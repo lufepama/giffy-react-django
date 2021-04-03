@@ -1,88 +1,73 @@
-from django.shortcuts import render
-from rest_framework.views import APIView
-from rest_framework import viewsets
 from rest_framework.response import Response
-from rest_framework import permissions
-from rest_framework import status
-from django.contrib.auth import login, logout
-from rest_framework.permissions import AllowAny
-from api.users.models import CustomUser
+from rest_framework.decorators import api_view, permission_classes
 from .serializers import CustomUserSerializer
-from django.contrib.auth import get_user_model
+from .models import CustomUser
+from rest_framework.permissions import AllowAny
+from rest_framework import status
 
-# Create your views here.
-User = get_user_model()
+#Login
+from rest_framework.authtoken.views import ObtainAuthToken
+from rest_framework.authtoken.models import Token
+from .serializers import UserTokenSerializer
+from django.contrib.sessions.models import Session
+from datetime import datetime
 
-
-class UserApiView(APIView):
+@api_view(['GET','POST'])
+@permission_classes([AllowAny])
+def user_get_create_api(request, *args, **kwargs):
     
-    permission_classes = (AllowAny,)
-    
-    def post(self, request, format= None, *args, **kwargs):#Create new users
+    if request.method == 'GET':
+
+        users = CustomUser.objects.all()
+        user_serializer = CustomUserSerializer(users, many = True)
+        return Response(user_serializer.data)
+
+    elif request.method == 'POST':
+        new_user_serializer = CustomUserSerializer(data= request.data, context=request.data)
         
-        name = request.POST['name']
-        email = request.POST['email']
-        username = request.POST['username']
-        password = request.POST['password']
-        password1 = request.POST['password1']
-        print(password)
-        qs = User.objects.filter(username=username).first()
-
-        if qs == None:
-
-            if password == password1:
-                new_user = User(
-                    first_name = name, username = username, email = email, password = password
-                )
-                new_user.save()
-            
-                return Response({'success':'Has creado la cuenta correctamente ;)'})
-            else:
-                return Response({'error':'Las contraseñas no coinciden'})
+        if new_user_serializer.is_valid():
+            new_user_serializer.save() #Create method need to be in serializer
+            return Response({'success':'Cuenta creada satisfactoriamente'}, status = status.HTTP_200_OK)
         else:
-            return Response({'error':'Ya existe un usuario con las mismas credenciales'})
+            return Response(new_user_serializer.errors)
 
-class UserLoginApiView(APIView):
-    
-    def generate_session_token (self, length=10):
-        return ''.join(random.SystemRandom().choice([chr(i) for i in range(97,123)] + [str(i) for i in range(10)]) for _ in range(length) )
+#Login
+class Login(ObtainAuthToken):
 
     def post(self, request, *args, **kwargs):
+        #Will recieve data (username, password) from post
         
-        username = request.data.get('username')
-        password = request.data.get('password')
-
-        try:
-            user = User.objects.get(username = username)
-
-            if user.password == password:
-                if user.session_token == '0':
-                    new_session_token = self.generate_session_token()
-                    user.session_token = new_session_token
-                    user.save()
-                    login(request, user)
-                    return Response({'success':'Has iniciado session correctamente'})
-
+        login_serializer = self.serializer_class(data = request.data, context = {'request':request}) #Called AuthTokenSerializer. Contain 3 fields: username, password and Token
+        print(login_serializer.is_valid())
+        if login_serializer.is_valid():#Yes, it has username and password.
+            #Once user is authenticated, it need to be logged in
+            user = login_serializer.validated_data['user']
+            if user.is_active:
+                token, created = Token.objects.get_or_create(user = user)
+                user_serializer = UserTokenSerializer(user)
+                if created:
+                    return Response({
+                        'token':token.key,
+                        'user': user_serializer.data,
+                        'message': 'Inicio de session existoso'
+                    }, status = status.HTTP_201_CREATED)
                 else:
-                    user.session_token = '0'
-                    user.save()
-                    return Response({'error':'Ya has iniciado sessión!'})
+                    all_sessions = Session.objects.filter(expire_date__gte =datetime.now())
+                    if all_sessions.exists():
+                        for session in all_sessions:
+                            session_data = session.get_decode()
+                            if user.id == int(session_data.get('_auth_user_id')):
+                                session.delete()                   
+                    #If user is logging from other place
+                    token.delete()
+                    token = Token.objects.create(user= user)
+                    return Response({
+                        'token':token.key,
+                        'user': user_serializer.data,
+                        'message': 'Inicio de session existoso'
+                    }, status = status.HTTP_201_CREATED)
             else:
-                return Response({'error':'Las credenciales no son correctas'})
-
-        except User.DoesNotExist:
-            return Response({'error':'El usuario no existe'})
-
-class UserGetTokenApiView(APIView):
-        
-    def get(self, request, username, *args, **kwargs):
-        
-        try:
-            user = User.objects.get(username= username)
-            if user.is_authenticated:
-                return Response({'success':'Ahi tienes!', 'token':user.session_token})
-            else:
-                return Response({'error':'El usuario no está autenticado'})
-
-        except User.DoesNotExist:
-            return Response({'error':'Ha habido un problema'})
+                return Response({'error':'El usuario no puede iniciar sesión'},
+                                     status = status.HTTP_401_UNAUTHORIZED)
+        else:
+            return Response({'error':'There was a problem'} )
